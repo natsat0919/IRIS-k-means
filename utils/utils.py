@@ -196,14 +196,14 @@ def centroid_summary(centroids, rows=14, cols=4 ):
     
     plots a summary of the centroids found by the k-means run
     '''
-
+    
     n_bins = 89
     core_1 = 1334.53
     core_2 = 1335.56
     lambda_min = 1334
     lambda_max = 1336.6
     xax = np.linspace( lambda_min, lambda_max, n_bins )
-
+    
     fig, axs = plt.subplots(rows, cols, figsize = (15, 15) )
     ax=axs.ravel()
     for k in range(len(centroids)):
@@ -264,17 +264,42 @@ def plot_cluster_members(cluster_number, spectra, k_means_labels, k_means_centro
     """
     
     
+    if k_means_labels.ndim == 1 and spectra.ndim ==1:
+        matching_index = np.where(k_means_labels==cluster_number)[0]
+        
+        if member_number is None:
+            member_number = len(matching_index)
     
-    matching_index = np.where(k_means_labels==cluster_number)[0]
-    if member_number is None:
-        member_number = len(matching_index)
+        plt.figure(figsize=(9, 6))
+        plt.ylim(-0.2, 1)
+        for i in range(member_number):
+            plt.plot(wavelength, spectra[matching_index[i]], color='gray', linewidth=1, linestyle='dotted')
     
-    plt.ylim(-0.2, 1)
-    for i in range(member_number):
-        plt.plot(wavelength, spectra[matching_index[i]], color='gray', linewidth=1, linestyle='dotted')
+        plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
+        plt.show()
     
-    plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
-    plt.show()
+    elif k_means_labels.ndim == 2 and spectra.ndim==2:
+        matching_index_x, matchig_index_y = np.where(k_means_labels==cluster_number)
+        
+        if member_number is None:
+            member_number = len(matching_index_x)
+    
+        plt.figure(figsize=(9, 6))
+        plt.ylim(-0.2, 1)
+        
+        for i in range(member_number):
+            plt.plot(wavelength, spectra[matching_index_x[i]][matchig_index_y[i]], color='gray', linewidth=1, linestyle='dotted')
+
+        plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
+        plt.show()
+        
+    
+    elif k_means_labels.ndim != spectra.ndim or k_means_labels.shape != spectra.shape:
+        
+        raise ValueError(f"Spectra and lables arrays must have the same dimensions, but have shapes {k_means_labels.shape} and {spectra.shape}")
+    
+    else:
+        raise ValueError(f"Spectra and labels array must have maximum 2 dimensions, but have  {k_means_labels.ndim} and {spectra.ndim}")
     
     return None
 
@@ -325,7 +350,7 @@ def get_complete_data(data_cube: np.ndarray, intensity_wavelength: int, k_means_
     print("Only use this function if you used extract_spectra function to get array of spectra to input into the k_means algorithm")
             
     pix_array_shape = data_cube[..., intensity_wavelength].shape
-    pixel_data = np.ndarray(pix_array_shape,dtype=object)
+    pixel_data = np.zeros(pix_array_shape,dtype=object)
     
     for i in range(data_cube.shape[-2]):
         ii = 0
@@ -334,8 +359,8 @@ def get_complete_data(data_cube: np.ndarray, intensity_wavelength: int, k_means_
             if index_range is not None:
                 data = row[index_range]
             
-            maximum = np.max(row)
-            spectrum = row/maximum
+            maximum = np.max(data)
+            spectrum = data/maximum
             pixel_data[ii, i] = Pixel(i, ii, spectrum)
             
             if np.mean(data) <= 0:

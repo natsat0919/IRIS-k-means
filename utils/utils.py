@@ -6,14 +6,15 @@ General functions used to load IRIS data, perform machine learning and plotting
 import iris_lmsalpy.extract_irisL2data as extract_irisL2data
 
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import colors
 from astropy.wcs import WCS
-import time
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.metrics import silhouette_score
-import dask
+#import dask
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from utils_classes import Pixel
 
 def load_IRIS_data(file_name: str, spectral_window:str , wavelength_min = None, 
                    wavelength_max = None) -> tuple:
@@ -28,10 +29,11 @@ def load_IRIS_data(file_name: str, spectral_window:str , wavelength_min = None,
     return: data --> data cube with all spectral and image data
             wavenlength --> wavelength range for CII lines
             index_range --> range to use to limit spectral range (boolean array) equivalent to the limited
+            sp --> IRIS class, can be used to plot interactive spectra with sp.quick_look()
     """
     
     raster_filename = file_name
-    #raster_filename = '/Users/natalia/Downloads/iris_l2_20141025_145828_3880106953_raster_t000_r00000.fits'
+    
     
     
     try:
@@ -67,64 +69,17 @@ def load_IRIS_data(file_name: str, spectral_window:str , wavelength_min = None,
 
         wavelength = wavelength[index_range]
     
-        return data, index_range, wavelength
+        return data, index_range, wavelength, sp
     
     else:
         
-        return data, wavelength
-
-def spectral_live_plot(data_cube, wavelength, 
-                                   pixel_height: int, index_range = None):
-    
-    """
-    Plotting animation of spectral change over time for a given pixel height
-    
-    input: data_cube --> 2D array containing all spectra (from extract_CII_spectra)
-           index_range --> range to use to limit soectral range (boolean array)
-           wavelength --> wavelength range to plot against
-           pixel_height --> y-pixel
-           
-    
-    output: plot of CII spectra change over time for a give pixel height
-    """
-    spectrum = data_cube[0, pixel_height]
-    
-    if index_range is not None:
-        spectrum = spectrum[index_range]
-    
-
-    plt.ion()
-    fig = plt.figure(figsize=(16,16))
-    ax = fig.add_subplot(111)
-    line1, = ax.plot(wavelength, spectrum)
-    ax.set_ylim(-8, 150)
-
-
-    for i in range(data_cube.shape[-2]):
-        spectrum_update = data_cube[i, pixel_height]
-        if index_range is not None:
-            spectrum_update = spectrum_update[index_range]
-        
-        if np.mean(spectrum_update)< -100:
-            pass
-        
-        else:
-            plt.title(f'Image/Raster number {i}')
-            line1.set_xdata(wavelength)
-            line1.set_ydata(spectrum_update)
-            fig.canvas.draw()
-      
-            # to flush the GUI events
-            fig.canvas.flush_events()
-            time.sleep(1)
-    
-    return None
+        return data, wavelength, sp
 
 
 
 def extract_spectra(data_cube: np.ndarray, index_range=None) -> np.ndarray:
     """
-    Extract only usable lines from all the spectra, removes any saturated spectra or negative spectra 
+    Extracts all the spectra from a datacube and normalises them 
     
     parameters: data_cube --> data cube with all spectra (from load_IRIS_data)
                 index_range --> range to use to limit soectral range (boolean array)
@@ -132,39 +87,23 @@ def extract_spectra(data_cube: np.ndarray, index_range=None) -> np.ndarray:
     return: spectra --> two dimensional array. Each row corresponds to a CII spectrum
     """
     print('Extracting spectra....')
-    #Use array containing 0s instead of empty array to reduce run time
-    spectra = np.zeros(shape=[920000, 89])
-    removed = 0
-    index = 0
-    for i in range(data_cube.shape[-2]):
-        
-        for row in data_cube[:,i,:]:
-            if index_range is not None:
-                row = row[index_range]
-                
-            if np.mean(row) <= 0:
-                removed += 1
-                pass
-            elif len(np.where(row >= 16000)[0])>15:
-                removed += 1
-                pass
-            else:
-                maximum = np.max(row)
-                spectra[index] = row/maximum
-                index +=1
-            
-    #Removing rows with all 0s
-    idx = np.argwhere(np.all(spectra[..., :] == 0, axis=1))
-    spectra = np.delete(spectra, idx, axis=0)
     
-    return spectra
+    spectra_flatten = data_cube.reshape(-1, data_cube.shape[2])
+    
+    if index_range is not None:
+        spectra_flatten = spectra_flatten[:, index_range]
+        
+    spectra_max = spectra_flatten.max(axis=1)
+    spectra_normalized = spectra_flatten/spectra_max[:, np.newaxis]
+    
+    return spectra_normalized
 
 
 
 def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0):
 
     '''
-    Credit to Brandon
+   Credits to Brandon
     Return centroids and labels of a data set using the k-means algorithm in minibatch style
 
     input: X --> dataset
@@ -172,6 +111,7 @@ def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0):
            batch_size --> number of data points used for a single update step of the centroids
            n_init --> number of times to run k-means, the iteration with the lowest inertia is retained
            verbose --> output statistics
+           init --> k-means++ or random
 
     output: centroids --> average point of each group
             labels --> list of assignments indicating which centroid each data point belongs to
@@ -187,35 +127,49 @@ def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0):
     labels = mbk.labels_
     inertia = mbk.inertia_
 
-    return centroids, labels, inertia, n_clusters
+    return centroids, labels, inertia, n_clusters, mbk
 
 
 def centroid_summary(centroids, rows=14, cols=4 ):
     '''
-    Credit to Brandon
+    Inspired by Brandon
     
     plots a summary of the centroids found by the k-means run
     '''
     
     n_bins = 89
-    core_1 = 1334.53
-    core_2 = 1335.56
+    core_1 = 1334.55
+    core_2 = 1335.58
     lambda_min = 1334
     lambda_max = 1336.6
     xax = np.linspace( lambda_min, lambda_max, n_bins )
     
-    fig, axs = plt.subplots(rows, cols, figsize = (15, 15) )
+    plt.rcParams['xtick.labelsize'] = 8
+    plt.rcParams['ytick.labelsize'] = 8
+    
+    fig, axs = plt.subplots(rows, cols, sharex=True, sharey=True, figsize=(8.27,16))
+    
+    fig.subplots_adjust(hspace=0.9) 
     ax=axs.ravel()
+
+    
     for k in range(len(centroids)):
         ax[k].plot(xax, centroids[k], color='black', linewidth=1.5, linestyle='-')
-        ax[k].axvline(x=core_1,color='black',linewidth = 1)
-        ax[k].axvline(x=core_2,color='black',linewidth = 1)
-        ax[k].set_xticks([])
-        ax[k].set_yticks([])
+        #ax[k].axvline(x=core_1,color='black',linewidth = 1)
+        #ax[k].axvline(x=core_2,color='black',linewidth = 1)
+        #ax[k].set_xticks([])
+        #ax[k].set_yticks([])
         ax[k].set_xlim(lambda_min,lambda_max)
-#         ax[k].set_ylim(0,1)
-        ax[k].text( .02, .82, str(k), transform=ax[k].transAxes, size=15)
+        ax[k].set_ylim(0,1)
+        ax[k].set_title(f'Group number {k}', fontsize=8)
+        #ax[k].text( .02, .82, str(k), transform=ax[k].transAxes, size=15)
+        
+    for j in range(len(centroids), cols*rows):
+        ax[j].axis("off")
+
     plt.show()
+    #plt.savefig('/Users/natalia/Desktop/centroid_summary.png', dpi=300)
+    
 
     return None
 
@@ -236,21 +190,21 @@ def Kmeans_optimisation(spectra, max_clusters):
     silhouette = []
     for i in range(2, max_clusters):
         ml_data = mini_batch_k_means(spectra, n_clusters=i, batch_size = 200, n_init=100)
-        score = dask.delayed(silhouette_score)(spectra,ml_data[1], metric='euclidean')
+        #score = dask.delayed(silhouette_score)(spectra,ml_data[1], metric='euclidean')
         inertias.append(ml_data[2])
         silhouette.append(score)
     
-    inertias = dask.compute(*inertias)
-    silhouette = dask.compute(*silhouette)
+    #inertias = dask.compute(*inertias)
+    #silhouette = dask.compute(*silhouette)
     return inertias, silhouette
 
 
 
 def plot_cluster_members(cluster_number, spectra, k_means_labels, k_means_centroids, 
-                         wavelength, member_number=None):
+                         wavelength, index_range=None, member_number=None):
     
     """
-    Plotting cluster members 
+    Plotting spectra corresponding to a cluster 
     
     input: cluster_number --> Cluster number from k-means
            spectra --> 2D array containing all CII spectra (from extract_CII_spectra)
@@ -262,44 +216,32 @@ def plot_cluster_members(cluster_number, spectra, k_means_labels, k_means_centro
     
     output: plot of spectrum of a cluster group with its assigned spectra
     """
+       
+    if k_means_labels.ndim == 2:
+        k_means_labels = k_means_labels.flatten()
     
-    
-    if k_means_labels.ndim == 1 and spectra.ndim ==1:
-        matching_index = np.where(k_means_labels==cluster_number)[0]
+    #Only if spectra input is the actual data cube used
+    if spectra.ndim==3: 
+            spectra = extract_spectra(spectra, index_range=index_range)
         
-        if member_number is None:
-            member_number = len(matching_index)
+    matching_index = np.where(k_means_labels==cluster_number)[0]
     
-        plt.figure(figsize=(9, 6))
-        plt.ylim(-0.2, 1)
-        for i in range(member_number):
+    if member_number is None:
+        member_number = len(matching_index)
+    
+    plt.figure(figsize=(9, 6))
+    plt.ylim(-0.2, 1)
+    plt.title(f"Cluster number {cluster_number}")
+    plt.xlabel('Wavelength [nm]')
+    plt.ylabel('Normalised intensity [DN]')
+        
+    for i in range(member_number):
             plt.plot(wavelength, spectra[matching_index[i]], color='gray', linewidth=1, linestyle='dotted')
-    
-        plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
-        plt.show()
-    
-    elif k_means_labels.ndim == 2 and spectra.ndim==2:
-        matching_index_x, matchig_index_y = np.where(k_means_labels==cluster_number)
-        
-        if member_number is None:
-            member_number = len(matching_index_x)
-    
-        plt.figure(figsize=(9, 6))
-        plt.ylim(-0.2, 1)
-        
-        for i in range(member_number):
-            plt.plot(wavelength, spectra[matching_index_x[i]][matchig_index_y[i]], color='gray', linewidth=1, linestyle='dotted')
+            
+       
+    plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
+    plt.show()
 
-        plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
-        plt.show()
-        
-    
-    elif k_means_labels.ndim != spectra.ndim or k_means_labels.shape != spectra.shape:
-        
-        raise ValueError(f"Spectra and lables arrays must have the same dimensions, but have shapes {k_means_labels.shape} and {spectra.shape}")
-    
-    else:
-        raise ValueError(f"Spectra and labels array must have maximum 2 dimensions, but have  {k_means_labels.ndim} and {spectra.ndim}")
     
     return None
 
@@ -310,7 +252,7 @@ def plot_raster(data_cube, intensity_wavelength):
     Plotting the actual image
     
     input: data_cube --> data cube outputted from load_iris 
-           intensity_wavelength --> wavelength at which to view the image. For CII lines use 133
+           intensity_wavelength --> wavelength index at which to view the image.
     
     """
     plt.figure(figsize=(15, 15))
@@ -318,104 +260,103 @@ def plot_raster(data_cube, intensity_wavelength):
     plt.title(f'X-Y image at wavelength {intensity_wavelength}')
     plt.show()
 
-            
-def get_complete_data(data_cube: np.ndarray, intensity_wavelength: int, k_means_labels, index_range = None, 
-                           individual_components = False):
-    """
-    IMPORTANT: Only use this function if you used extract_spectra function to get array 
-    of spectra to input into the k_means algorithm
-    
-    input: data_cube --> data cube outputted from load_iris 
-           intensity_wavelength --> wavelength at which to view intensity. For CII lines use 133
-           k_means_labels --> labels assigned to spectra as outputted by k_means
-           index_range --> array to slice the spetcra
-           idividual_components --> if True it will only output 3 separate arrays with classes, intensities and spectra
-           
-    output: if individual_components = False --> 2D array with each entry containing object with class number, spectrum and pixel intensity
-            To acess values of Pixel object:
-                Pixel spectrum label from k-means - Pixel.cluster_label
-                Pixel intensity - Pixel.intensity
-                Pixel spectrum - Pixel.spectrum
-                Pixel Image number - Pixel.raster_number
-                Pixel y-coordinate - Pixel.y_dimension
-                
-            [[Pixel Object], [Pixel Object], .....  ]]
-            [[Pixel Object]], [Pixel Object], ..... ]] 
-            [        .              .               ]]     ----> Array shape = total_image_number x max_y-coordinate
-            [        .              .               ]]
-            [        .              .               ]]
-            if individual_components = True -->  Tuple containing 3 separate arrays 
-    
-    """
-    print("Only use this function if you used extract_spectra function to get array of spectra to input into the k_means algorithm")
-            
-    pix_array_shape = data_cube[..., intensity_wavelength].shape
-    pixel_data = np.zeros(pix_array_shape,dtype=object)
-    
-    for i in range(data_cube.shape[-2]):
-        ii = 0
-        for row in data_cube[:,i,:]:
-            data = row
-            if index_range is not None:
-                data = row[index_range]
-            
-            maximum = np.max(data)
-            spectrum = data/maximum
-            pixel_data[ii, i] = Pixel(i, ii, spectrum)
-            
-            if np.mean(data) <= 0:
-                pixel_data[ii, i].add_class_intensity_spectrum(row[intensity_wavelength],  np.nan, spectrum)
-                ii += 1
-                pass
-            
-            elif len(np.where(data >= 16000)[0])>15:
-                pixel_data[ii, i].add_class_intensity_spectrum(row[intensity_wavelength], np.nan, spectrum)
-                ii += 1
-                pass
-            
-            else:
-               
-                pixel_data[ii, i].add_class_intensity_spectrum(row[intensity_wavelength], k_means_labels[0], spectrum)
-                k_means_labels = np.delete(k_means_labels, 0)
-                ii += 1
-                
-    if individual_components:
-        components = vectorize_array(pixel_data)
-        return components
-    else:
-        return pixel_data
-
-def vectorize_array(pixel_data: np.ndarray) -> tuple:
-    """
-    Vectorising 2D array with objects
-    input: pixel_data --> 2D array outputted from get_complete_data
-           
-    output: Tuple containing 3 separate arrays with labels, spectra and pixel intensities
-    """
-    
-    inten = lambda d: d.intensity
-    vinten = np.vectorize(inten)
-    intensities = vinten(pixel_data)
-    
-    label = lambda c: c.cluster_label
-    vlabel = np.vectorize(label)
-    labels = vlabel(pixel_data)
-    
-    sp = lambda s: s.spectrum
-    vsp = np.vectorize(sp, otypes=[list])
-    spectra = vsp(pixel_data)
-
-    return intensities, labels, spectra
-
 
 def plot_image_labels(intensities, labels):
     """
-    input: intensities --> list/array of intensities
-           labels --> list/array of labels
+    Plotting an image along with spectral labels assigned to each pixel
+    input: intensities --> 2D list/array of intensities
+           labels --> 1D or 2D array of labels
            
     """
-    fig, axs = plt.subplots(2, 1, figsize=(20, 20))
+    if labels.ndim == 1:
+        labels = labels.reshape(intensities.shape[0], intensities.shape[1])
+        
+    fig, axs = plt.subplots(1, 2, figsize=(20, 20), sharey = True)
+    plt.subplots_adjust(wspace=.0)
+    
     axs[0].imshow(intensities, vmin=0, vmax=45, cmap='hot')
-    axs[1].imshow(labels, cmap='Dark2')
+    im1 = axs[1].imshow(labels, cmap='gist_ncar')
+    
+    divider = make_axes_locatable(axs[1])
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    fig.colorbar(im1, cax=cax, orientation='vertical')
+    
     plt.show()
+
+
+def superposition_raster_labels(intensities, labels, labels_to_plot):
+    """
+    Plotting an image along wth spectral labels on top
+    input: intensities --> 2D list/array of intensities
+           labels --> 1D or 2D array of labels
+           labels_to_plot --> list of label numbers which to include (i.e which cluster groups to include)
+    
+    """
+    if labels.ndim == 1:
+        labels = labels.reshape(intensities.shape[0], intensities.shape[1])
+        
+    labels_to_plot = sorted(labels_to_plot)
+    
+    labels_copy = np.copy(labels)
+    labels_masked = np.ma.masked_where( np.isin(labels_copy, labels_to_plot, invert=True), labels_copy)
+    
+
+    color_list = ['darkorange','lime', 'mediumorchid', 'red', 'cornflowerblue', 'yellow', 'cyan']
+    colorbar_len = len(labels_to_plot)
+    
+    labels_max_add = np.max(labels_to_plot) +1 
+    bounds = np.append(labels_to_plot, labels_max_add)
+    
+    plt.figure(figsize=(20,20))
+    
+    cmap = colors.ListedColormap(color_list[:colorbar_len+1])
+    cmap.set_bad(color='none')
+    norm = matplotlib.colors.BoundaryNorm(bounds, colorbar_len)
+
+    plt.imshow(intensities, vmin=0, vmax=45, cmap='Greys')
+    plt.imshow(labels_masked, alpha = 0.5,  cmap=cmap, norm=norm)
+    
+    cb = plt.colorbar(ticks=labels_to_plot)
+    cb.ax.set_yticklabels(labels_to_plot)
+    
+    plt.xlabel('X (pixel)')
+    plt.ylabel('Y (pixel)')
+
+    plt.show()
+    
+    
+# Ignore these functions
+def change_cluster(centroids, cluster_delete, cluster_add, labels):
+    labels = np.array(labels)
+    centroids = np.delete(centroids, [cluster_delete], axis=0)
+    labels[labels==cluster_delete] = cluster_add
+    
+    if cluster_delete<len(centroids):
+        for i in range(cluster_delete+1, len(centroids)+1):
+            labels[labels==i] = i-1
+            
+    return centroids, labels
+
+def interpolate_correct_labels(labels, merge_cluster, wrong_clusters:list, centroids, raster_size:tuple):
+    #[55, 8, 7, 3, 2] 1
+    """
+    Used for merging and deleting clusters along with reshaping a 1D array of labels into a 2D array that can be used for plotting
+           
+    """
+    
+    wrong_clusters = sorted(wrong_clusters, reverse=True)
+    correct_labels = np.array([])
+    correct_labels = change_cluster(centroids, wrong_clusters[0], 1, labels)[1]
+    for cluster in wrong_clusters[1:]:
+        #centoid = k_means_tot_f[0]
+        correct_labels = change_cluster(centroids, cluster, 1, correct_labels)[1]
+    
+    #rotating the label 2D distribution, raster_size = (y, x)
+    correct_labels = np.reshape(correct_labels, raster_size)
+    correct_labels = np.rot90(correct_labels)
+    correct_labels = np.flipud(correct_labels)
+    
+    return correct_labels
+
+
 

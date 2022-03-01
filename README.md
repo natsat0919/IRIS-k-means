@@ -51,7 +51,9 @@ centroid_summary(k_means[0], rows=10, cols=5)
 
 <img src="/images/centroids.png" width="400" height="500">
 
-### 6. Now you can do whatever is necessary to improve your k-means
+### 6. This is the supervised part of the pipline
+
+This step requires to merge or split centroids with high variance. Once the final list of clusters and labels is obtained pass the result to a K-NN algorithm (KNN function) with K=1.
 
 ### 7. Classify spectra of a test image
 

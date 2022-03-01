@@ -11,10 +11,14 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from astropy.wcs import WCS
 from sklearn.cluster import MiniBatchKMeans
-from sklearn.metrics import silhouette_score
+import pandas as pd
 #import dask
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
+from scipy import constants
+import pywt
+from scipy import signal
+from scipy.optimize import curve_fit
+from iris_plot import *
 
 def load_IRIS_data(file_name: str, spectral_window:str , wavelength_min = None, 
                    wavelength_max = None) -> tuple:
@@ -69,11 +73,11 @@ def load_IRIS_data(file_name: str, spectral_window:str , wavelength_min = None,
 
         wavelength = wavelength[index_range]
     
-        return data, index_range, wavelength, sp
+        return data, index_range, wavelength, sp, wcs
     
     else:
         
-        return data, wavelength, sp
+        return data, wavelength, sp, wcs
 
 
 
@@ -100,7 +104,7 @@ def extract_spectra(data_cube: np.ndarray, index_range=None) -> np.ndarray:
 
 
 
-def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0):
+def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0, init='k-means++'):
 
     '''
    Credits to Brandon
@@ -119,7 +123,7 @@ def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0):
     '''
     # k-means++ initiates the centroids in a smart configuration, promoting better convergence results
     mbk = MiniBatchKMeans(init='k-means++', n_clusters=n_clusters, batch_size=batch_size,
-                          n_init=n_init, max_no_improvement=10, verbose=verbose)
+                          n_init=n_init, max_no_improvement=1, verbose=verbose)
 
     mbk.fit(X)
 
@@ -130,203 +134,26 @@ def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0):
     return centroids, labels, inertia, n_clusters, mbk
 
 
-def centroid_summary(centroids, rows=14, cols=4 ):
-    '''
-    Inspired by Brandon
-    
-    plots a summary of the centroids found by the k-means run
-    '''
-    
-    n_bins = 89
-    core_1 = 1334.55
-    core_2 = 1335.58
-    lambda_min = 1334
-    lambda_max = 1336.6
-    xax = np.linspace( lambda_min, lambda_max, n_bins )
-    
-    plt.rcParams['xtick.labelsize'] = 8
-    plt.rcParams['ytick.labelsize'] = 8
-    
-    fig, axs = plt.subplots(rows, cols, sharex=True, sharey=True, figsize=(8.27,16))
-    
-    fig.subplots_adjust(hspace=0.9) 
-    ax=axs.ravel()
 
+def merge_centroids(clusters_delete, k, centroid_list_update):
     
-    for k in range(len(centroids)):
-        ax[k].plot(xax, centroids[k], color='black', linewidth=1.5, linestyle='-')
-        #ax[k].axvline(x=core_1,color='black',linewidth = 1)
-        #ax[k].axvline(x=core_2,color='black',linewidth = 1)
-        #ax[k].set_xticks([])
-        #ax[k].set_yticks([])
-        ax[k].set_xlim(lambda_min,lambda_max)
-        ax[k].set_ylim(0,1)
-        ax[k].set_title(f'Group number {k}', fontsize=8)
-        #ax[k].text( .02, .82, str(k), transform=ax[k].transAxes, size=15)
-        
-    for j in range(len(centroids), cols*rows):
-        ax[j].axis("off")
-
-    plt.show()
-    #plt.savefig('/Users/natalia/Desktop/centroid_summary.png', dpi=300)
+    clusters_delete = np.sort(clusters_delete)[::-1]
+    clusters_mean = k[0][clusters_delete[0]]
+    clusters_mean = np.vstack((clusters_mean, k[0][clusters_delete[1]]))
+    clusters_mean = np.mean(clusters_mean, axis=0)
     
-
-    return None
-
-
-#TODO figure out how to speed up silhouette method. Don't use for now!
-def Kmeans_optimisation(spectra, max_clusters):
-    """
-    Get silhouette score and inertia to evaluate ideal number of cluster members
+    centroid_list_update = np.delete(centroid_list_update, clusters_delete[0], 0)
+    centroid_list_update = np.delete(centroid_list_update, clusters_delete[1], 0)
     
-    input: spectra --> 2 dimensional array containing all spectral lines used from k-means.
-           k_meas_data --> data outputted from mini_batch_k_means
-    
-    output: intertias --> 1D array containing interia for different cluster numbers.
-            silhouette --> 1D array containing silhouette score for different cluster numbers.
-    """
-    
-    inertias = []
-    silhouette = []
-    for i in range(2, max_clusters):
-        ml_data = mini_batch_k_means(spectra, n_clusters=i, batch_size = 200, n_init=100)
-        #score = dask.delayed(silhouette_score)(spectra,ml_data[1], metric='euclidean')
-        inertias.append(ml_data[2])
-        silhouette.append(score)
-    
-    #inertias = dask.compute(*inertias)
-    #silhouette = dask.compute(*silhouette)
-    return inertias, silhouette
-
-
-
-def plot_cluster_members(cluster_number, spectra, k_means_labels, k_means_centroids, 
-                         wavelength, index_range=None, member_number=None):
-    
-    """
-    Plotting spectra corresponding to a cluster 
-    
-    input: cluster_number --> Cluster number from k-means
-           spectra --> 2D array containing all CII spectra (from extract_CII_spectra)
-           k_means_labels --> labels outputted from k means
-           k_means_centroids --> ceontoids outputted from k means
-           wavelength --> wavelength range to plot against
-           member_number --> number of members to plot 
-           
-    
-    output: plot of spectrum of a cluster group with its assigned spectra
-    """
-       
-    if k_means_labels.ndim == 2:
-        k_means_labels = k_means_labels.flatten()
-    
-    #Only if spectra input is the actual data cube used
-    if spectra.ndim==3: 
-            spectra = extract_spectra(spectra, index_range=index_range)
-        
-    matching_index = np.where(k_means_labels==cluster_number)[0]
-    
-    if member_number is None:
-        member_number = len(matching_index)
-    
-    plt.figure(figsize=(9, 6))
-    plt.ylim(-0.2, 1)
-    plt.title(f"Cluster number {cluster_number}")
-    plt.xlabel('Wavelength [nm]')
-    plt.ylabel('Normalised intensity [DN]')
-        
-    for i in range(member_number):
-            plt.plot(wavelength, spectra[matching_index[i]], color='gray', linewidth=1, linestyle='dotted')
-            
-       
-    plt.plot(wavelength, k_means_centroids[cluster_number], color='black', linewidth=1.5, linestyle='-')
-    plt.show()
-
-    
-    return None
-
-
-
-def plot_raster(data_cube, intensity_wavelength):
-    """
-    Plotting the actual image
-    
-    input: data_cube --> data cube outputted from load_iris 
-           intensity_wavelength --> wavelength index at which to view the image.
-    
-    """
-    plt.figure(figsize=(15, 15))
-    plt.imshow(data_cube[..., intensity_wavelength], vmin=0, vmax=45, cmap='hot')
-    plt.title(f'X-Y image at wavelength {intensity_wavelength}')
-    plt.show()
-
-
-def plot_image_labels(intensities, labels):
-    """
-    Plotting an image along with spectral labels assigned to each pixel
-    input: intensities --> 2D list/array of intensities
-           labels --> 1D or 2D array of labels
-           
-    """
-    if labels.ndim == 1:
-        labels = labels.reshape(intensities.shape[0], intensities.shape[1])
-        
-    fig, axs = plt.subplots(1, 2, figsize=(20, 20), sharey = True)
-    plt.subplots_adjust(wspace=.0)
-    
-    axs[0].imshow(intensities, vmin=0, vmax=45, cmap='hot')
-    im1 = axs[1].imshow(labels, cmap='gist_ncar')
-    
-    divider = make_axes_locatable(axs[1])
-    cax = divider.append_axes('right', size='5%', pad=0.05)
-    fig.colorbar(im1, cax=cax, orientation='vertical')
-    
-    plt.show()
-
-
-def superposition_raster_labels(intensities, labels, labels_to_plot):
-    """
-    Plotting an image along wth spectral labels on top
-    input: intensities --> 2D list/array of intensities
-           labels --> 1D or 2D array of labels
-           labels_to_plot --> list of label numbers which to include (i.e which cluster groups to include)
-    
-    """
-    if labels.ndim == 1:
-        labels = labels.reshape(intensities.shape[0], intensities.shape[1])
-        
-    labels_to_plot = sorted(labels_to_plot)
-    
-    labels_copy = np.copy(labels)
-    labels_masked = np.ma.masked_where( np.isin(labels_copy, labels_to_plot, invert=True), labels_copy)
-    
-
-    color_list = ['darkorange','lime', 'mediumorchid', 'red', 'cornflowerblue', 'yellow', 'cyan']
-    colorbar_len = len(labels_to_plot)
-    
-    labels_max_add = np.max(labels_to_plot) +1 
-    bounds = np.append(labels_to_plot, labels_max_add)
-    
-    plt.figure(figsize=(20,20))
-    
-    cmap = colors.ListedColormap(color_list[:colorbar_len+1])
-    cmap.set_bad(color='none')
-    norm = matplotlib.colors.BoundaryNorm(bounds, colorbar_len)
-
-    plt.imshow(intensities, vmin=0, vmax=45, cmap='Greys')
-    plt.imshow(labels_masked, alpha = 0.5,  cmap=cmap, norm=norm)
-    
-    cb = plt.colorbar(ticks=labels_to_plot)
-    cb.ax.set_yticklabels(labels_to_plot)
-    
-    plt.xlabel('X (pixel)')
-    plt.ylabel('Y (pixel)')
-
-    plt.show()
+    centroid_list_update = np.append(centroid_list_update, [clusters_mean], axis=0)
+    return centroid_list_update
     
     
-# Ignore these functions
+# Ignore this functions
 def change_cluster(centroids, cluster_delete, cluster_add, labels):
+    """
+    used to replace a cluster with different one     
+    """
     labels = np.array(labels)
     centroids = np.delete(centroids, [cluster_delete], axis=0)
     labels[labels==cluster_delete] = cluster_add
@@ -340,8 +167,7 @@ def change_cluster(centroids, cluster_delete, cluster_add, labels):
 def interpolate_correct_labels(labels, merge_cluster, wrong_clusters:list, centroids, raster_size:tuple):
     #[55, 8, 7, 3, 2] 1
     """
-    Used for merging and deleting clusters along with reshaping a 1D array of labels into a 2D array that can be used for plotting
-           
+    Used for merging and deleting clusters along with reshaping a 1D array of labels into a 2D array that can be used for plotting        
     """
     
     wrong_clusters = sorted(wrong_clusters, reverse=True)
@@ -360,3 +186,157 @@ def interpolate_correct_labels(labels, merge_cluster, wrong_clusters:list, centr
 
 
 
+def smoothing(spectra, wavelength=None, plot=False):
+    print("Smoothing spectra...")
+    
+    spectra_resampled = signal.resample(spectra, 512, axis=1)
+    for i in range(len(spectra_resampled)):
+        if not i % 1000:
+            print(i)
+        wavelets = pywt.swt(spectra_resampled[i], 'coif2')
+        wavelets[1:] = (pywt.threshold(ii, value=0.2, mode="soft" ) for ii in wavelets[1:])
+        wavelets_reconstructed = pywt.iswt(wavelets, 'coif2')
+        
+        #normalise
+        max_intensity = np.max(wavelets_reconstructed)
+        wavelets_reconstructed = wavelets_reconstructed / max_intensity
+        spectra_resampled[i] = wavelets_reconstructed
+        
+        if plot:
+            plt.figure()
+            plt.plot(wavelength, spectra)
+            #plt.plot(np.linspace(np.min(wavelength), np.max(wavelength), num=512), wavelet_cut, label='Cut 5')
+            plt.plot(np.linspace(np.min(wavelength), np.max(wavelength), num=512), wavelets_reconstructed, label='Tresholding 0.2')
+            plt.xlabel('Wavelength')
+            plt.ylabel('Normalized intensity')
+            plt.title('Original data points vs removed fluctuations with coif2 wavelets')
+            plt.legend()
+    
+    return spectra_resampled
+    
+
+
+def gauss(x, H, A, x0, sigma):
+    return H + A * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2))
+
+def gauss_fit(x, y):
+    mean = sum(x * y) / sum(y)
+    sigma = np.sqrt(sum(y * (x - mean) ** 2) / sum(y))
+    popt, pcov = curve_fit(gauss, x, y, p0=[min(y), max(y), mean, sigma])
+    return popt
+
+def fwhm_intensity(spectrum, wavelength, peak_1_range, peak_2_range):
+    """
+    Determine full-with-half-maximum of a peaked set of points, x and y.
+
+    Assumes that there is only one peak present in the datasset.  The function
+    uses a spline interpolation of order k.
+    """
+    
+    fwhm = []
+    intensity = []
+    for peak_range in [peak_1_range, peak_2_range]:
+        intensity_max = np.max(spectrum[peak_range[0]:peak_range[1]])
+        H, A, x0, sigma = gauss_fit(wavelength[peak_range[0]:peak_range[1]], 
+                                    spectrum[peak_range[0]:peak_range[1]])
+        FWHM = 2.35482 * sigma
+        fwhm.append(FWHM)
+        
+        intensity.append(intensity_max)
+
+    return fwhm, intensity
+
+
+
+class Centroid:
+    def __init__(self, centroid_number, centroid_spectrum, fwhm, intensity_max):
+        self.centroid_number = centroid_number
+        self.centroid_spectrum = centroid_spectrum
+        self.fwhm_left = fwhm[0]
+        self.fwhm_right = fwhm[1]
+        self.intensity_left = intensity_max[0]
+        self.intensity_right = intensity_max[1]
+        self.intensity_ratio = np.min(intensity_max) / np.max(intensity_max)
+
+def centroid_analysis(centroid_number, n_clusters, centroids, labels, spectra, wavelength):
+    centroid = centroids[centroid_number]
+    labels_index = np.where(labels == centroid_number)[0]
+    spectra_cluster = spectra[labels_index]
+    
+    print(len(spectra_cluster))
+    k_means = mini_batch_k_means(spectra_cluster, n_clusters=n_clusters, batch_size=len(spectra_cluster))
+    
+    centroids_info = []
+    for i in range(len(k_means[0])):
+        centr = k_means[0][i]
+        fwhm, intensity_max = fwhm_intensity(centr, k=3)
+        c = Centroid(i, centr, fwhm, intensity_max)
+        centroids_info.append(c)
+    
+    similar_spectra_plot(centroids_info, wavelength, centroid_number)
+    
+    for ii in range(len(k_means[0])):
+        plot_cluster_members(ii, spectra_cluster, k_means[1], k_means[0], wavelength)
+        
+    return k_means[0] 
+
+
+
+
+def bisector_velocity(spectrum, wavelength, interpolation_number_rows, line_side):
+    """
+    Function for performing bisecot analysis of two spectral lines
+    """
+    intensity_max_index = np.where(spectrum==np.max(spectrum))[0][0]
+    
+    left_side_df = pd.Series(wavelength[0:intensity_max_index], index=spectrum[0:intensity_max_index])
+    right_side_df = pd.Series(wavelength[intensity_max_index:], index=spectrum[intensity_max_index:])
+    
+    interpolate_rows = right_side_df.iloc[1::interpolation_number_rows].index
+    nans = np.zeros(len(interpolate_rows)) + np.nan
+    
+    interpolate_rows_df = pd.Series(nans, index=interpolate_rows)
+    
+    left_side_df = left_side_df.append(interpolate_rows_df)
+    
+    left_side_df = left_side_df.sort_index(ascending=False)
+    
+    left_side_df = left_side_df.interpolate(method='index')
+    
+    left_side_df_reverse = pd.Series(left_side_df.index, index=left_side_df.values)
+    right_side_df_reverse = pd.Series(right_side_df.index, index=right_side_df.values)
+    
+    wavelengths_left = left_side_df_reverse[left_side_df_reverse.isin(interpolate_rows[1:])].index
+    wavelengths_right = right_side_df_reverse[right_side_df_reverse.isin(interpolate_rows[1:])].index
+
+    wavelength_df = pd.DataFrame({'intensity': interpolate_rows[1:], 'wavelengths_left':wavelengths_left, 'wavelengths_right':wavelengths_right})
+    
+    wavelength_df['mean_wavelength'] = wavelength_df[['wavelengths_left', 'wavelengths_right']].mean(axis=1)
+    
+    if line_side == 'left':
+        rest_wavelength = 133.4532
+    else:
+        rest_wavelength = 133.5708
+        
+    velocities = (wavelength_df['mean_wavelength'] - rest_wavelength) * constants.c / rest_wavelength 
+    
+
+    wavelength_df['velocity'] = velocities 
+    
+    return (wavelength_df)
+    
+def mask_ellipse(center_x, center_y, width, height, angle, array_size):
+    """
+    Crease a mask for an array
+    
+    array_size = [602, 436]
+    """
+    from skimage.draw import ellipse
+    
+    mask = np.zeros((array_size[0], array_size[1]), dtype=np.uint8)
+    rr, cc = ellipse(center_y, center_x, height, width, rotation=np.deg2rad(angle))
+    mask[rr, cc] = 1
+    mask[mask==0] = False
+    mask[mask==1] = True
+    
+    return mask

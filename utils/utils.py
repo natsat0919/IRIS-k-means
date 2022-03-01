@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from astropy.wcs import WCS
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.neighbors import KNeighborsClassifier
 import pandas as pd
 #import dask
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -133,6 +134,14 @@ def mini_batch_k_means(X, n_clusters=10, batch_size=10, n_init=10, verbose=0, in
 
     return centroids, labels, inertia, n_clusters, mbk
 
+def KNN(x_train, labels_train, n_neighbors=1, x_test):
+    
+    k_nn = KNeighborsClassifier(n_neighbors=n_neighbors)
+    k_nn.fit(x_train, labels_train)
+    
+    labels_test = k_nn.predict(x_test)
+    
+    return labels_test
 
 
 def merge_centroids(clusters_delete, k, centroid_list_update):
